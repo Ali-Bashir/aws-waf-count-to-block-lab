@@ -1,0 +1,6 @@
+# Lab only: which managed-rule labels each test case received.
+# Run against log group aws-waf-logs-<stack-name>.
+parse @message /"X-Lab-Case","value":"(?<test_case>[^"]+)"/
+| parse @message /"labels":\[(?<labels>[^\]]*)\]/
+| stats count(*) as requests by test_case, labels
+| sort test_case

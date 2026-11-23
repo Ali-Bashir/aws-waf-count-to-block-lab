@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AWS WAF count-to-block lab. An internal ALB with an echo Lambda behind it, a
+  traffic-generator Lambda in the same VPC, and a web ACL with the AWS managed
+  Core rule set and Known bad inputs rule groups. Change the Stage parameter to
+  move from Count mode to Block with label-based exceptions.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the internal ALB and the traffic Lambda.
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two subnets in different Availability Zones.
+  Stage:
+    Type: String
+    Default: count
+    AllowedValues:
+      - count
+      - block-noisy-count
+      - tuned
+    Description: >-
+      count = every managed rule overridden to Count.
+      block-noisy-count = managed rules block, except three noisy Core rule set rules left on Count.
+      tuned = block-noisy-count plus three label-based exception rules.
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90]
+
+Conditions:
+  IsCount: !Equals [!Ref Stage, count]
+  IsTuned: !Equals [!Ref Stage, tuned]
+
+Resources:
+  # ---------------- Application: echo Lambda behind an internal ALB ----------------
+  EchoRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  EchoFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt EchoRole.Arn
+      Timeout: 5
+      Code:
+        ZipFile: |
+{{ECHO}}
+
+  EchoInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt EchoFunction.Arn
+      Principal: elasticloadbalancing.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  TrafficSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: WAF lab traffic Lambda (egress only)
+      VpcId: !Ref VpcId
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: WAF lab ALB, HTTP from the traffic Lambda only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref TrafficSecurityGroup
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  EchoTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: EchoInvokePermission
+    Properties:
+      TargetType: lambda
+      HealthCheckEnabled: false
+      Targets:
+        - Id: !GetAtt EchoFunction.Arn
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref EchoTargetGroup
+
+  # ---------------- Traffic generator inside the VPC ----------------
+  TrafficRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+  TrafficFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt TrafficRole.Arn
+      Timeout: 60
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds: [!Ref TrafficSecurityGroup]
+      Environment:
+        Variables:
+          ALB_DNS: !GetAtt Alb.DNSName
+      Code:
+        ZipFile: |
+{{TRAFFIC}}
+
+  # ---------------- AWS WAF ----------------
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${AWS::StackName}-acl
+      Scope: REGIONAL
+      DefaultAction: { Allow: {} }
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}-acl
+      Rules:
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 0
+          OverrideAction: { None: {} }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesCommonRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              RuleActionOverrides: !If
+                - IsCount
+                - - { Name: NoUserAgent_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: UserAgent_BadBots_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: SizeRestrictions_QUERYSTRING, ActionToUse: { Count: {} } }
+                  - { Name: SizeRestrictions_Cookie_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: SizeRestrictions_BODY, ActionToUse: { Count: {} } }
+                  - { Name: SizeRestrictions_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: EC2MetaDataSSRF_BODY, ActionToUse: { Count: {} } }
+                  - { Name: EC2MetaDataSSRF_COOKIE, ActionToUse: { Count: {} } }
+                  - { Name: EC2MetaDataSSRF_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: EC2MetaDataSSRF_QUERYARGUMENTS, ActionToUse: { Count: {} } }
+                  - { Name: GenericLFI_QUERYARGUMENTS, ActionToUse: { Count: {} } }
+                  - { Name: GenericLFI_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: GenericLFI_BODY, ActionToUse: { Count: {} } }
+                  - { Name: RestrictedExtensions_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: RestrictedExtensions_QUERYARGUMENTS, ActionToUse: { Count: {} } }
+                  - { Name: GenericRFI_QUERYARGUMENTS, ActionToUse: { Count: {} } }
+                  - { Name: GenericRFI_BODY, ActionToUse: { Count: {} } }
+                  - { Name: GenericRFI_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: CrossSiteScripting_COOKIE, ActionToUse: { Count: {} } }
+                  - { Name: CrossSiteScripting_QUERYARGUMENTS, ActionToUse: { Count: {} } }
+                  - { Name: CrossSiteScripting_BODY, ActionToUse: { Count: {} } }
+                  - { Name: CrossSiteScripting_URIPATH, ActionToUse: { Count: {} } }
+                - - { Name: NoUserAgent_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: SizeRestrictions_BODY, ActionToUse: { Count: {} } }
+                  - { Name: CrossSiteScripting_BODY, ActionToUse: { Count: {} } }
+
+        - Name: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 1
+          OverrideAction: { None: {} }
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+              RuleActionOverrides: !If
+                - IsCount
+                - - { Name: JavaDeserializationRCE_BODY, ActionToUse: { Count: {} } }
+                  - { Name: JavaDeserializationRCE_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: JavaDeserializationRCE_QUERYSTRING, ActionToUse: { Count: {} } }
+                  - { Name: JavaDeserializationRCE_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: Host_localhost_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: PROPFIND_METHOD, ActionToUse: { Count: {} } }
+                  - { Name: ExploitablePaths_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: Log4JRCE_QUERYSTRING, ActionToUse: { Count: {} } }
+                  - { Name: Log4JRCE_BODY, ActionToUse: { Count: {} } }
+                  - { Name: Log4JRCE_URIPATH, ActionToUse: { Count: {} } }
+                  - { Name: Log4JRCE_HEADER, ActionToUse: { Count: {} } }
+                  - { Name: ReactJSRCE_BODY, ActionToUse: { Count: {} } }
+                - !Ref AWS::NoValue
+
+        # Label-based exceptions. They must run AFTER the managed groups, because
+        # the labels they check are added by those groups. Copy label keys from
+        # your logs: the casing differs from the rule names.
+        - !If
+          - IsTuned
+          - Name: block-xss-body-except-cms
+            Priority: 2
+            Action: { Block: {} }
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: block-xss-body-except-cms
+            Statement:
+              AndStatement:
+                Statements:
+                  - LabelMatchStatement:
+                      Scope: LABEL
+                      Key: awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body
+                  - NotStatement:
+                      Statement:
+                        ByteMatchStatement:
+                          SearchString: /cms/pages
+                          FieldToMatch: { UriPath: {} }
+                          TextTransformations: [{ Priority: 0, Type: NONE }]
+                          PositionalConstraint: STARTS_WITH
+          - !Ref AWS::NoValue
+
+        - !If
+          - IsTuned
+          - Name: block-oversize-body-except-reports
+            Priority: 3
+            Action: { Block: {} }
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: block-oversize-body-except-reports
+            Statement:
+              AndStatement:
+                Statements:
+                  - LabelMatchStatement:
+                      Scope: LABEL
+                      Key: awswaf:managed:aws:core-rule-set:SizeRestrictions_Body
+                  - NotStatement:
+                      Statement:
+                        ByteMatchStatement:
+                          SearchString: /api/reports
+                          FieldToMatch: { UriPath: {} }
+                          TextTransformations: [{ Priority: 0, Type: NONE }]
+                          PositionalConstraint: EXACTLY
+          - !Ref AWS::NoValue
+
+        - !If
+          - IsTuned
+          - Name: block-no-user-agent-except-health
+            Priority: 4
+            Action: { Block: {} }
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: block-no-user-agent-except-health
+            Statement:
+              AndStatement:
+                Statements:
+                  - LabelMatchStatement:
+                      Scope: LABEL
+                      Key: awswaf:managed:aws:core-rule-set:NoUserAgent_Header
+                  - NotStatement:
+                      Statement:
+                        ByteMatchStatement:
+                          SearchString: /health
+                          FieldToMatch: { UriPath: {} }
+                          TextTransformations: [{ Priority: 0, Type: NONE }]
+                          PositionalConstraint: EXACTLY
+          - !Ref AWS::NoValue
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref Alb
+      WebACLArn: !GetAtt WebAcl.Arn
+
+  WafLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      # AWS WAF requires the aws-waf-logs- prefix.
+      LogGroupName: !Sub aws-waf-logs-${AWS::StackName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  WafLogging:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WebAcl.Arn
+      LogDestinationConfigs:
+        # Log group ARN without the trailing :* that GetAtt Arn returns.
+        - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${WafLogGroup}
+
+Outputs:
+  TrafficFunctionName:
+    Description: Invoke this function to send the 11 test requests.
+    Value: !Ref TrafficFunction
+  WebAclName:
+    Value: !Sub ${AWS::StackName}-acl
+  WafLogGroupName:
+    Value: !Ref WafLogGroup
+  AlbDnsName:
+    Value: !GetAtt Alb.DNSName

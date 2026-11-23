@@ -1,0 +1,6 @@
+# After switching to Block: which rule terminated each blocked request.
+fields terminatingRuleId, httpRequest.uri as uri
+| filter action = "BLOCK"
+| parse @message /"X-Lab-Case","value":"(?<test_case>[^"]+)"/
+| stats count(*) as blocked by test_case, uri, terminatingRuleId
+| sort test_case

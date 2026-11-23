@@ -1,0 +1,7 @@
+# Production version: which managed-rule labels fire, on which paths, from how many clients.
+# Many distinct clients on one legitimate path usually means a false positive.
+fields httpRequest.uri as uri, httpRequest.clientIp as ip
+| parse @message /"labels":\[(?<labels>[^\]]*)\]/
+| filter labels like /awswaf:managed/
+| stats count(*) as requests, count_distinct(ip) as clients by labels, uri
+| sort requests desc
