@@ -8,6 +8,8 @@ It is the companion to the article **Turn On AWS WAF Without Blocking Real Users
 
 ![Architecture](docs/architecture.svg)
 
+*Diagram drawn with the official [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/). The echo function is an ALB target and does not run in the VPC.*
+
 | Resource | Purpose |
 |---|---|
 | Internal Application Load Balancer | The protected endpoint. Its security group allows port 80 only from the traffic Lambda. |
@@ -189,7 +191,7 @@ src/echo.py            Echo Lambda source (embedded inline in the template)
 src/traffic.py         Traffic generator source (embedded inline in the template)
 build/                 Template source and the script that embeds src/ into template.yaml
 queries/               CloudWatch Logs Insights queries
-docs/architecture.svg  Architecture diagram
+docs/architecture.*    Architecture diagram (SVG and PNG)
 ```
 
 If you edit the Lambda code, edit `src/` and run `python3 build/build.py` to regenerate `template.yaml`.
