@@ -2,7 +2,7 @@
 
 Turn on AWS WAF managed rules without blocking real users. This lab deploys a small test application, puts the AWS managed rules in Count mode, shows you how to find false positives in the WAF logs, and then switches to Block with label-based exceptions instead of disabling rules.
 
-It is the companion to the article **Turn On AWS WAF Without Blocking Real Users: Count Mode, Logs, Tuning, Then Block** on AWS Builder Center.
+It is the companion to the article [Turn On AWS WAF Without Blocking Real Users: Count Mode, Logs, Tuning, Then Block](https://builder.aws.com/content/3MUFvPpAewIDlMZ7Ffv79lCD8PA/turn-on-aws-waf-without-blocking-real-users-count-mode-logs-tuning-then-block) on AWS Builder Center.
 
 ## What gets deployed
 
