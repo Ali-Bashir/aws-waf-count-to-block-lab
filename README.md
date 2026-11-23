@@ -6,7 +6,7 @@ It is the companion to the article **Turn On AWS WAF Without Blocking Real Users
 
 ## What gets deployed
 
-![Architecture](docs/architecture.svg)
+![Architecture: traffic Lambda and internal ALB in private subnets, AWS WAF web ACL on the ALB, echo Lambda target, WAF logs to CloudWatch Logs](docs/architecture.png)
 
 *Diagram drawn with the official [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/). The echo function is an ALB target and does not run in the VPC.*
 
